@@ -4,6 +4,7 @@ public class Task1 {
     public static void main(String[] args) {
         // キーボード（標準入力）からの入力を受け取るための準備
         Scanner scanner = new Scanner(System.in);
+
         
         // 顧客数 N を読み込む
         int n = scanner.nextInt();
@@ -39,10 +40,10 @@ public class Task1 {
         });
         
         // クエリ数 Q を読み込む
-        int q = scanner.nextInt();
+        int e = scanner.nextInt();
         
         // Q個のクエリを処理するループ
-        for (int i = 0; i < q; i++) {
+        for (int i = 0; i < e; i++) {
             int a = scanner.nextInt();
             int b = scanner.nextInt();
             
