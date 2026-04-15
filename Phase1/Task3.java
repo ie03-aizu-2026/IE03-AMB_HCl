@@ -1,6 +1,6 @@
 import java.util.*;
 
-public class Main {
+public class Task3 {
     static int W, H; //グリッドの幅と高さ
     static boolean[][] blocked; //そのマスに入れるかどうか　trueなら通れない
     static int[] dx = {1, -1, 0, 0};
