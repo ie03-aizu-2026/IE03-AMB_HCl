@@ -1,7 +1,4 @@
-package IE03_AmbHCl.Phase1;
-
 import java.util.*;
-import IE03_AmbHCl.Common.GridMap;
 
 public class Task3 {
     static int W, H; //グリッドの幅と高さ
