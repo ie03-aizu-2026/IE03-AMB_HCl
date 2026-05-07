@@ -1,10 +1,11 @@
+package IE03_AmbHCl.Phase1;
+
 import java.util.*;
+import IE03_AmbHCl.Common.GridMap;
 
 public class Task3 {
     static int W, H; //グリッドの幅と高さ
     static boolean[][] blocked; //そのマスに入れるかどうか　trueなら通れない
-    static int[] dx = {1, -1, 0, 0};
-    static int[] dy = {0, 0, 1, -1};
 
     public static void main(String[] args) {
         Scanner sc = new Scanner(System.in);
@@ -34,8 +35,8 @@ public class Task3 {
         blocked[W - 2][0] = false;   // 出口
 
         // BFS（入口と出口から）
-        int[][] distFromStart = bfs(1, 0); //入り口からBFS
-        int[][] distFromExit = bfs(W - 2, 0); //出口からBFS
+        int[][] distFromStart = GridMap.bfs(1, 0, blocked, W, H); //入り口からBFS
+        int[][] distFromExit = GridMap.bfs(W - 2, 0, blocked, W, H); //出口からBFS
 
         int Q = sc.nextInt(); //クエリ（お客の数)を取得
 
@@ -66,33 +67,5 @@ public class Task3 {
         System.out.print(sb.toString()); //出力
 
         sc.close();
-    }
-
-    static int[][] bfs(int sx, int sy) {
-        int[][] dist = new int[W][H]; //各マスまでの距離を保存
-        for (int[] row : dist) Arrays.fill(row, -1); //もし-1なら未探索
-
-        Queue<int[]> q = new LinkedList<>(); //キューの設定、qは探索待ちのマス
-        q.add(new int[]{sx, sy});
-        dist[sx][sy] = 0;
-
-        while (!q.isEmpty()) { //キューが空になるまで
-            int[] cur = q.poll();
-            int x = cur[0], y = cur[1]; //今いるマス
-
-            for (int i = 0; i < 4; i++) { //上下左右を試す
-                int nx = x + dx[i];
-                int ny = y + dy[i];
-
-                if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue; //範囲外かチェック
-                if (blocked[nx][ny]) continue; //マスに入れるかどうかチェック
-                if (dist[nx][ny] != -1) continue; //訪問済みかチェック
-
-                dist[nx][ny] = dist[x][y] + 1; //1マス移動したから+1
-                q.add(new int[]{nx, ny}); //次に探索するマスに追加
-            }
-        }
-
-        return dist;
     }
 }
