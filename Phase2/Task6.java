@@ -5,12 +5,6 @@ public class Task6 {
     static int N;
     static int[] pickX, pickY;
     static String[] itemNames;
-    static int[][][] distFromPickup;
-    static int[][] distFromExit;
-
-    // クエリごとの最良解
-    static int bestCnt;
-    static long bestItems;
 
     public static void main(String[] args) throws IOException {
         BufferedReader br = new BufferedReader(new InputStreamReader(System.in));
@@ -44,10 +38,68 @@ public class Task6 {
         blocked[W - 2][0] = false;
 
         int[][] distFromStart = GridMap.bfs(1, 0, blocked, W, H);
-        distFromExit  = GridMap.bfs(W - 2, 0, blocked, W, H);
-        distFromPickup = new int[N][][];
+        int[][] distFromExit  = GridMap.bfs(W - 2, 0, blocked, W, H);
+        int[][][] distFromPickup = new int[N][][];
         for (int i = 0; i < N; i++) {
             distFromPickup[i] = GridMap.bfs(pickX[i], pickY[i], blocked, W, H);
+        }
+
+        final int INF = Integer.MAX_VALUE / 2;
+
+        // 商品iから商品jへの距離、開始地点・出口からの距離（-1は到達不可）
+        int[] startDist = new int[N];
+        int[] exitDist  = new int[N];
+        int[][] interDist = new int[N][N];
+        for (int i = 0; i < N; i++) {
+            startDist[i] = distFromStart[pickX[i]][pickY[i]];
+            exitDist[i]  = distFromExit[pickX[i]][pickY[i]];
+            for (int j = 0; j < N; j++) {
+                interDist[i][j] = distFromPickup[i][pickX[j]][pickY[j]];
+            }
+        }
+
+        // dp2[mask*N + i] = 商品集合maskを全部訪問し、商品iで終える最短距離
+        // 区間ごとに分けず、全商品(最大20個)を対象に一度だけ計算する。
+        // こうすることで「複数の区間から取り得る境界上の商品」を区間ごとに
+        // 独立に確定させることがなくなり、後戻りなしの誤りを避けられる。
+        int full = 1 << N;
+        int[] dp2 = new int[full * N];
+        Arrays.fill(dp2, INF);
+        for (int i = 0; i < N; i++) {
+            if (startDist[i] >= 0) dp2[(1 << i) * N + i] = startDist[i];
+        }
+        for (int mask = 1; mask < full; mask++) {
+            int base = mask * N;
+            for (int i = 0; i < N; i++) {
+                if ((mask & (1 << i)) == 0) continue;
+                int di = dp2[base + i];
+                if (di >= INF) continue;
+                for (int j = 0; j < N; j++) {
+                    if ((mask & (1 << j)) != 0) continue;
+                    int d = interDist[i][j];
+                    if (d < 0) continue;
+                    int nm = mask | (1 << j);
+                    int cand = di + d;
+                    int idx = nm * N + j;
+                    if (cand < dp2[idx]) dp2[idx] = cand;
+                }
+            }
+        }
+
+        // routeDist[mask] = 商品集合maskを全部訪問して出口まで抜けるときの最短距離
+        int[] routeDist = new int[full];
+        for (int mask = 1; mask < full; mask++) {
+            int base = mask * N;
+            int best = INF;
+            for (int i = 0; i < N; i++) {
+                if ((mask & (1 << i)) == 0) continue;
+                if (exitDist[i] < 0) continue;
+                int d = dp2[base + i];
+                if (d >= INF) continue;
+                int total = d + exitDist[i];
+                if (total < best) best = total;
+            }
+            routeDist[mask] = best;
         }
 
         int Q = Integer.parseInt(br.readLine().trim());
@@ -56,54 +108,29 @@ public class Task6 {
         for (int q = 0; q < Q; q++) {
             st = new StringTokenizer(br.readLine());
             int M = Integer.parseInt(st.nextToken());
-            int[] prods = new int[M];
-            for (int i = 0; i < M; i++) prods[i] = nameToIdx.get(st.nextToken());
+            int required = 0;
+            for (int i = 0; i < M; i++) required |= 1 << nameToIdx.get(st.nextToken());
 
-            final int INF = Integer.MAX_VALUE / 2;
+            int minDist = routeDist[required];
 
-            // Phase1: TSP DP で最短距離を確定
-            int[][] dp = new int[1 << M][M];
-            for (int[] row : dp) Arrays.fill(row, INF);
-            for (int i = 0; i < M; i++) {
-                int d = distFromStart[pickX[prods[i]]][pickY[prods[i]]];
-                if (d >= 0) dp[1 << i][i] = d;
-            }
-            for (int mask = 1; mask < (1 << M); mask++) {
-                for (int i = 0; i < M; i++) {
-                    if ((mask & (1 << i)) == 0 || dp[mask][i] >= INF) continue;
-                    for (int j = 0; j < M; j++) {
-                        if ((mask & (1 << j)) != 0) continue;
-                        int d = distFromPickup[prods[i]][pickX[prods[j]]][pickY[prods[j]]];
-                        if (d < 0) continue;
-                        int nm = mask | (1 << j);
-                        dp[nm][j] = Math.min(dp[nm][j], dp[mask][i] + d);
-                    }
+            int bestCnt = -1;
+            int bestMask = 0;
+            String bestStr = null;
+            for (int mask = required; mask < full; mask++) {
+                if ((mask & required) != required) continue;
+                if (routeDist[mask] != minDist) continue;
+                int cnt = Integer.bitCount(mask);
+                if (cnt < bestCnt) continue;
+                String s = buildStr(mask);
+                if (cnt > bestCnt || s.compareTo(bestStr) < 0) {
+                    bestCnt = cnt; bestMask = mask; bestStr = s;
                 }
-            }
-
-            int fullMask = (1 << M) - 1;
-            int minDist = INF;
-            for (int i = 0; i < M; i++) {
-                if (dp[fullMask][i] >= INF) continue;
-                int d = distFromExit[pickX[prods[i]]][pickY[prods[i]]];
-                if (d >= 0) minDist = Math.min(minDist, dp[fullMask][i] + d);
-            }
-
-            // Phase2: DFS で最適経路をすべて探索し、商品セットを確定
-            bestCnt   = -1;
-            bestItems = 0L;
-            for (int i = 0; i < M; i++) {
-                if (dp[1 << i][i] >= INF) continue;
-                long seg = segItems(distFromStart, distFromPickup[prods[i]],
-                                    dp[1 << i][i], -1, prods[i], 0L);
-                seg |= (1L << prods[i]);
-                dfs(1 << i, i, seg, dp, prods, M, fullMask, minDist);
             }
 
             sb.append(minDist);
             List<String> outList = new ArrayList<>();
             for (int p = 0; p < N; p++) {
-                if ((bestItems & (1L << p)) != 0) outList.add(itemNames[p]);
+                if ((bestMask & (1 << p)) != 0) outList.add(itemNames[p]);
             }
             Collections.sort(outList);
             for (String name : outList) sb.append(' ').append(name);
@@ -113,116 +140,10 @@ public class Task6 {
         System.out.print(sb);
     }
 
-    // DFS: DP1 の最適遷移のみを辿り、見た商品セットを計算する
-    static void dfs(int mask, int last, long currentSeen,
-                    int[][] dp, int[] prods, int M, int fullMask, int minDist) {
-        if (mask == fullMask) {
-            int dToExit = distFromExit[pickX[prods[last]]][pickY[prods[last]]];
-            if (dToExit < 0 || dp[fullMask][last] + dToExit != minDist) return;
-
-            long seg = segItems(distFromPickup[prods[last]], distFromExit,
-                                dToExit, prods[last], -1, currentSeen);
-            long totalSeen = currentSeen | seg;
-            int  totalCnt  = Long.bitCount(totalSeen);
-
-            if (totalCnt > bestCnt ||
-                (totalCnt == bestCnt && lexSmaller(totalSeen, bestItems))) {
-                bestCnt   = totalCnt;
-                bestItems = totalSeen;
-            }
-            return;
-        }
-
-        for (int j = 0; j < M; j++) {
-            if ((mask & (1 << j)) != 0) continue;
-            int d = distFromPickup[prods[last]][pickX[prods[j]]][pickY[prods[j]]];
-            if (d < 0) continue;
-            int nm = mask | (1 << j);
-            if (dp[mask][last] + d != dp[nm][j]) continue; // 最短でない遷移はスキップ
-
-            long seg = segItems(distFromPickup[prods[last]], distFromPickup[prods[j]],
-                                d, prods[last], prods[j], currentSeen);
-            seg |= (1L << prods[j]);
-            dfs(nm, j, currentSeen | seg, dp, prods, M, fullMask, minDist);
-        }
-    }
-
-    // セグメント A→B 上で「1本の最短経路上で同時に回れる」最大商品セットを返す
-    // currentSeen: すでに見た商品（候補から除外）
-    static long segItems(int[][] distA, int[][] distB, int totalDist,
-                         int excludeSrc, int excludeDst, long currentSeen) {
-        // 候補商品を列挙
-        int[] cands = new int[N];
-        int k = 0;
-        for (int p = 0; p < N; p++) {
-            if (p == excludeSrc || p == excludeDst) continue;
-            if ((currentSeen & (1L << p)) != 0) continue;
-            int dA = distA[pickX[p]][pickY[p]];
-            int dB = distB[pickX[p]][pickY[p]];
-            if (dA >= 0 && dB >= 0 && dA + dB == totalDist) cands[k++] = p;
-        }
-        if (k == 0) return 0L;
-
-        // 内部DP: 候補を1本の最短経路上で同時に回れる最大部分集合を求める
-        // inner[mask][i] = 候補のうちmaskを回収済み、最後がcands[i] のときのAからの距離
-        // 遷移条件: inner[mask][i] + dist(cands[i], cands[j]) == dist(A, cands[j])
-        final int INF2 = Integer.MAX_VALUE / 2;
-        int[][] inner = new int[1 << k][k];
-        for (int[] row : inner) Arrays.fill(row, INF2);
-        for (int i = 0; i < k; i++) {
-            inner[1 << i][i] = distA[pickX[cands[i]]][pickY[cands[i]]];
-        }
-        for (int mask2 = 1; mask2 < (1 << k); mask2++) {
-            for (int i = 0; i < k; i++) {
-                if ((mask2 & (1 << i)) == 0 || inner[mask2][i] >= INF2) continue;
-                for (int j = 0; j < k; j++) {
-                    if ((mask2 & (1 << j)) != 0) continue;
-                    int d2 = distFromPickup[cands[i]][pickX[cands[j]]][pickY[cands[j]]];
-                    if (d2 < 0) continue;
-                    int nd = inner[mask2][i] + d2;
-                    // AからcandJまでの最短距離と一致するときのみ有効な遷移
-                    if (nd == distA[pickX[cands[j]]][pickY[cands[j]]]) {
-                        int nm2 = mask2 | (1 << j);
-                        if (nd < inner[nm2][j]) inner[nm2][j] = nd;
-                    }
-                }
-            }
-        }
-
-        // 有効な最終状態から最大商品数・辞書順最小を選ぶ
-        int    bestCnt2 = 0;
-        long   bestBits = 0L;
-        String bestStr  = null;
-        for (int mask2 = 1; mask2 < (1 << k); mask2++) {
-            for (int i = 0; i < k; i++) {
-                if ((mask2 & (1 << i)) == 0 || inner[mask2][i] >= INF2) continue;
-                if (inner[mask2][i] + distB[pickX[cands[i]]][pickY[cands[i]]] != totalDist) continue;
-                int  cnt  = Integer.bitCount(mask2);
-                long bits = 0L;
-                for (int j = 0; j < k; j++) {
-                    if ((mask2 & (1 << j)) != 0) bits |= (1L << cands[j]);
-                }
-                if (cnt > bestCnt2) {
-                    bestCnt2 = cnt; bestBits = bits; bestStr = buildStr(bits);
-                } else if (cnt == bestCnt2) {
-                    String s = buildStr(bits);
-                    if (bestStr == null || s.compareTo(bestStr) < 0) {
-                        bestBits = bits; bestStr = s;
-                    }
-                }
-            }
-        }
-        return bestBits;
-    }
-
-    static boolean lexSmaller(long a, long b) {
-        return buildStr(a).compareTo(buildStr(b)) < 0;
-    }
-
-    static String buildStr(long items) {
+    static String buildStr(int mask) {
         List<String> list = new ArrayList<>();
         for (int p = 0; p < N; p++) {
-            if ((items & (1L << p)) != 0) list.add(itemNames[p]);
+            if ((mask & (1 << p)) != 0) list.add(itemNames[p]);
         }
         Collections.sort(list);
         StringBuilder sb = new StringBuilder();
