@@ -61,3 +61,97 @@
 8 7 E
 8 8 E
 8 9 E
+62
+apple
+banana
+orange
+grape
+melon
+lemon
+cherry
+peach
+mango
+pear
+carrot
+onion
+potato
+tomato
+cabbage
+spinach
+garlic
+ginger
+pumpkin
+cucumber
+bread
+butter
+cheese
+yogurt
+milk
+cream
+egg
+honey
+jam
+sugar
+salt
+pepper
+vinegar
+oil
+flour
+rice
+noodle
+pasta
+cereal
+coffee
+tea
+juice
+water
+wine
+beer
+chicken
+beef
+pork
+salmon
+shrimp
+tofu
+soap
+shampoo
+towel
+tissue
+detergent
+toothbrush
+candle
+battery
+umbrella
+notebook
+pencil
+30
+2 bread butter
+1 milk
+3 coffee sugar milk
+2 chicken rice
+1 egg
+4 apple banana orange grape
+2 shampoo soap
+1 bread
+3 tomato onion garlic
+2 tea sugar
+1 rice
+2 pork beef
+3 bread milk egg
+1 coffee
+2 cucumber tomato
+4 chicken beef pork salmon
+1 juice
+2 wine cheese
+3 milk bread butter
+1 pencil
+2 notebook pencil
+3 potato onion carrot
+2 coffee milk
+1 water
+3 shampoo soap towel
+2 rice chicken
+4 apple pear peach mango
+1 tofu
+2 bread egg
+3 detergent soap tissue
