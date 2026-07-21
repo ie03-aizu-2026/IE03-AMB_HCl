@@ -11,7 +11,11 @@ public class Task7 {
     static int[][] interDist;           // interDist[i][j] = 棚iの取得マス->棚jの取得マス
     static int[][] distFromStart, distFromExit;
     static int[][][] distFromPickup;    // 各棚の取得マスを始点としたBFS距離マップ
-    static Map<Long, Integer> pickupToShelf; // 取得マス座標 -> 棚インデックス
+    // 取得マス座標 -> そのマスを共有する棚インデックスの一覧。
+    // 背中合わせの棚などで複数の棚が同じ取得マスを持つことがあるため、
+    // 1マスにつき1棚だけを覚える方式（後勝ちで上書き）ではなく、
+    // マスを共有する棚を全部保持する。
+    static Map<Long, List<Integer>> pickupToShelf;
 
     // 各BFS始点について、「その始点からの最短距離を保ったまま、通過できる棚の数を
     // 最大化する経路」を復元するための後退方向テーブル（0-3=GridMap.dx/dy添字, -1=始点）。
@@ -89,7 +93,9 @@ public class Task7 {
         }
 
         pickupToShelf = new HashMap<>();
-        for (int i = 0; i < S; i++) pickupToShelf.put(key(pickX[i], pickY[i]), i);
+        for (int i = 0; i < S; i++) {
+            pickupToShelf.computeIfAbsent(key(pickX[i], pickY[i]), k -> new ArrayList<>()).add(i);
+        }
 
         // ---- 経路復元用の後退方向テーブルを一度だけ計算（Task7.java.orig_backupとの主な差分） ----
         parentDirFromStart = computeParentDir(distFromStart, W, H);
@@ -105,8 +111,9 @@ public class Task7 {
             addPathCells(cells, distFromExit,  parentDirFromExit,  pickX[i], pickY[i]); // 棚i -> 出口
             int cnt = 0;
             for (long c : cells) {
-                Integer sh = pickupToShelf.get(c);
-                if (sh != null && sh != i) cnt++;
+                List<Integer> here = pickupToShelf.get(c);
+                if (here == null) continue;
+                for (int sh : here) if (sh != i) cnt++;
             }
             exposure[i] = cnt;
         }
@@ -279,7 +286,8 @@ public class Task7 {
                 if (dist[x][y] >= 0) buckets.get(dist[x][y]).add(new int[]{x, y});
 
         for (int[] c : buckets.get(0)) {
-            best[c[0]][c[1]] = pickupToShelf.containsKey(key(c[0], c[1])) ? 1 : 0;
+            List<Integer> here0 = pickupToShelf.get(key(c[0], c[1]));
+            best[c[0]][c[1]] = (here0 != null) ? here0.size() : 0;
         }
         for (int k = 1; k <= maxDist; k++) {
             for (int[] c : buckets.get(k)) {
@@ -291,7 +299,8 @@ public class Task7 {
                     if (dist[nx][ny] != k - 1) continue;
                     if (best[nx][ny] > bestPred) { bestPred = best[nx][ny]; bestDir = d; }
                 }
-                int selfShelf = pickupToShelf.containsKey(key(x, y)) ? 1 : 0;
+                List<Integer> here = pickupToShelf.get(key(x, y));
+                int selfShelf = (here != null) ? here.size() : 0;
                 best[x][y] = bestPred + selfShelf;
                 parentDir[x][y] = bestDir;
             }
@@ -531,7 +540,10 @@ public class Task7 {
         addPathCells(cells, distFromExit, parentDirFromExit, pickX[lastShelf], pickY[lastShelf]);
 
         int seen = 0;
-        for (long c : cells) if (pickupToShelf.containsKey(c)) seen++;
+        for (long c : cells) {
+            List<Integer> here = pickupToShelf.get(c);
+            if (here != null) seen += here.size();
+        }
         return seen;
     }
 }
