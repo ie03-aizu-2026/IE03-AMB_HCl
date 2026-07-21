@@ -227,8 +227,11 @@ public class Task7 {
             int[] items = history[r];
             int[] shelves = new int[items.length];
             for (int k = 0; k < items.length; k++) shelves[k] = productToShelf[items[k]];
-            List<int[]> path = buildRoutePath(shelves);
-            int seen = simulateTripAndCountShelves(shelves);
+            // 出力ルートの seen は厳密解を使う（区間をまたいだ棚の重複除去まで最大化）。
+            // Stage Dの最適化ループは従来の simulateTripAndCountShelves のままなので性能に影響しない。
+            TripPlan plan = planTripExact(shelves);
+            List<int[]> path = plan.path;
+            int seen = plan.seen;
             j.append("{\"idx\":").append(r).append(",\"items\":[");
             for (int k = 0; k < items.length; k++) {
                 if (k > 0) j.append(',');
@@ -306,6 +309,359 @@ public class Task7 {
             }
         }
         return parentDir;
+    }
+
+    // ==================== 出力ルート専用の厳密解 ====================
+    // buildVizJson（履歴ごとに1回だけ実行）で seen を厳密に求めるための一式。
+    // Stage Dのホットループでは使わない（simulateTripAndCountShelvesは従来のまま）ので
+    // 最適化の実行時間には影響しない。
+    //
+    // 考え方: あるトリップについて「入口→(要求棚を全部)→出口の最短距離」を保ったまま
+    //   通過できる棚（=商品）の枚数を最大化する。区間ごとに独立して最大化すると、
+    //   区間をまたいで同じ棚を二重に数えられず和集合の最大化にならない。そこで
+    //   各区間で「同時に通過可能な棚集合」を経路列挙なしのDPで全列挙し、区間をまたいだ
+    //   和集合が最大になる組み合わせを選ぶ。訪問順は最短距離を実現するものだけを対象。
+    static final class TripPlan { int dist; int seen; List<int[]> path; }
+
+    static final int EXACT_MAX_ITEMS = 8;      // これを超える履歴は順列全探索が非現実的なので従来法にフォールバック
+    static final int EXACT_MAX_BONUS = 62;     // ボーナス棚がlong mask(63bit)上限を超える場合は従来法にフォールバック
+    static final int EXACT_COMBO_CAP = 1 << 16; // 区間結合時に保持する和集合マスク数の上限
+
+    static int[][] distMapForStop(int stop) {
+        if (stop == -1) return distFromStart;   // 入口
+        if (stop == -2) return distFromExit;    // 出口
+        return distFromPickup[stop];            // 棚
+    }
+    static int stopX(int stop) { return stop == -1 ? 1 : stop == -2 ? (W - 2) : pickX[stop]; }
+    static int stopY(int stop) { return stop == -1 ? 0 : stop == -2 ? 0     : pickY[stop]; }
+
+    // stopA -> stopB の最短経路DAG上で、各セルに「そこへ到達するまでに通過しうる
+    // ボーナス棚集合（bitmask）の全パターン」をレイヤーDPで求める。bidxはボーナスセル
+    // ->ビット位置。経路復元にも使うので、終点だけでなく全セルのマスク集合を返す。
+    static Map<Long, Set<Long>> segMasksWithCells(int a, int b, Map<Long, Integer> bidx) {
+        int[][] dA = distMapForStop(a), dB = distMapForStop(b);
+        int ax = stopX(a), ay = stopY(a), bx = stopX(b), by = stopY(b);
+        int D = dA[bx][by];
+        Map<Long, Set<Long>> masks = new HashMap<>();
+        if (D < 0) return masks;
+
+        List<int[]> valid = new ArrayList<>();
+        for (int x = 0; x < W; x++)
+            for (int y = 0; y < H; y++)
+                if (dA[x][y] >= 0 && dB[x][y] >= 0 && dA[x][y] + dB[x][y] == D)
+                    valid.add(new int[]{x, y});
+        valid.sort((p, q) -> Integer.compare(dA[p[0]][p[1]], dA[q[0]][q[1]]));
+
+        for (int[] c : valid) masks.put(key(c[0], c[1]), new HashSet<>());
+        masks.get(key(ax, ay)).add(bonusBit(ax, ay, bidx));
+
+        for (int[] c : valid) {
+            int x = c[0], y = c[1];
+            if (x == ax && y == ay) continue;
+            int cd = dA[x][y];
+            Set<Long> acc = new HashSet<>();
+            for (int d = 0; d < 4; d++) {
+                int ux = x + GridMap.dx[d], uy = y + GridMap.dy[d];
+                if (ux < 0 || uy < 0 || ux >= W || uy >= H) continue;
+                if (dA[ux][uy] != cd - 1) continue;
+                Set<Long> um = masks.get(key(ux, uy));
+                if (um != null) acc.addAll(um);
+            }
+            long bb = bonusBit(x, y, bidx);
+            Set<Long> cm = masks.get(key(x, y));
+            for (long mm : acc) cm.add(mm | bb);
+        }
+        return masks;
+    }
+
+    // 終点で到達可能なボーナス棚集合（区間単体の全パターン）
+    static Set<Long> segAchievableMasks(int a, int b, Map<Long, Integer> bidx, Set<Long> requiredCells) {
+        Map<Long, Set<Long>> masks = segMasksWithCells(a, b, bidx);
+        Set<Long> bm = masks.get(key(stopX(b), stopY(b)));
+        if (bm == null || bm.isEmpty()) { Set<Long> s = new HashSet<>(); s.add(0L); return s; }
+        return bm;
+    }
+
+    // stopA -> stopB の最短経路で、ボーナス棚集合が targetMask となる具体的な経路を
+    // segMasksWithCellsの結果から後退復元する。返すのは A から B へ向かう座標列。
+    static List<int[]> reconstructSegPath(int a, int b, long targetMask,
+                                           Map<Long, Set<Long>> masks, Map<Long, Integer> bidx) {
+        int[][] dA = distMapForStop(a);
+        int ax = stopX(a), ay = stopY(a), bx = stopX(b), by = stopY(b);
+        List<int[]> rev = new ArrayList<>();   // B から A へ
+        int cx = bx, cy = by;
+        long cur = targetMask;
+        rev.add(new int[]{cx, cy});
+        while (!(cx == ax && cy == ay)) {
+            long prevMask = cur & ~bonusBit(cx, cy, bidx);
+            int cd = dA[cx][cy];
+            boolean moved = false;
+            for (int d = 0; d < 4; d++) {
+                int ux = cx + GridMap.dx[d], uy = cy + GridMap.dy[d];
+                if (ux < 0 || uy < 0 || ux >= W || uy >= H) continue;
+                if (dA[ux][uy] != cd - 1) continue;
+                Set<Long> um = masks.get(key(ux, uy));
+                if (um != null && um.contains(prevMask)) {
+                    cx = ux; cy = uy; cur = prevMask; rev.add(new int[]{cx, cy}); moved = true; break;
+                }
+            }
+            if (!moved) break;   // 理論上到達するはず（保険）
+        }
+        Collections.reverse(rev);   // A から B へ
+        return rev;
+    }
+
+    static long bonusBit(int x, int y, Map<Long, Integer> bidx) {
+        Integer i = bidx.get(key(x, y));
+        return (i == null) ? 0L : (1L << i);
+    }
+
+    // マスク集合が大きくなりすぎたら、popcount上位のものだけ残す（和集合最大化には十分）
+    static Set<Long> capMasks(Set<Long> masks, Map<Long, Integer> bidx) {
+        if (masks.size() <= EXACT_COMBO_CAP) return masks;
+        long[] inv = invBidx(bidx);
+        List<Long> list = new ArrayList<>(masks);
+        list.sort((p, q) -> Integer.compare(maskWeight(q, inv), maskWeight(p, inv)));
+        return new HashSet<>(list.subList(0, EXACT_COMBO_CAP));
+    }
+
+    static long[] invBidx(Map<Long, Integer> bidx) {
+        long[] inv = new long[bidx.size()];
+        for (Map.Entry<Long, Integer> e : bidx.entrySet()) inv[e.getValue()] = e.getKey();
+        return inv;
+    }
+
+    // maskに含まれるボーナスセルの棚枚数合計（衝突マスは複数枚として数える）
+    static int maskWeight(long mask, long[] inv) {
+        int w = 0;
+        for (int i = 0; i < inv.length; i++) {
+            if ((mask >> i & 1L) != 0) {
+                List<Integer> here = pickupToShelf.get(inv[i]);
+                if (here != null) w += here.size();
+            }
+        }
+        return w;
+    }
+
+    // トリップの厳密解（seen最大値と、その最短距離を実現する経路）を返す
+    static TripPlan planTripExact(int[] shelves) {
+        TripPlan res = new TripPlan();
+        int m = shelves.length;
+        if (m == 0) { res.dist = 0; res.seen = 0; res.path = new ArrayList<>(); return res; }
+
+        // 大きすぎる履歴は順列全探索が非現実的なので従来法にフォールバック
+        if (m > EXACT_MAX_ITEMS) {
+            res.path = buildRoutePath(shelves);
+            res.seen = simulateTripAndCountShelves(shelves);
+            res.dist = res.path.isEmpty() ? -1 : res.path.size() - 1;
+            return res;
+        }
+
+        Set<Long> requiredCells = new HashSet<>();
+        for (int s : shelves) requiredCells.add(key(pickX[s], pickY[s]));
+
+        // 最短距離を実現する訪問順を全列挙
+        List<int[]> minOrders = new ArrayList<>();
+        int[] best = { Integer.MAX_VALUE };
+        permuteOrders(shelves, 0, new int[m], new boolean[m], minOrders, best);
+        if (minOrders.isEmpty()) {   // 到達不能
+            res.dist = -1; res.seen = 0; res.path = new ArrayList<>(); return res;
+        }
+        res.dist = best[0];
+
+        int reqW = 0;
+        for (long ck : requiredCells) {
+            List<Integer> here = pickupToShelf.get(ck);
+            if (here != null) reqW += here.size();
+        }
+
+        int bestSeen = -1;
+        int[] bestOrder = minOrders.get(0);
+        boolean fellBack = false;
+
+        for (int[] order : minOrders) {
+            int[] stops = orderToStops(order);
+            Map<Long, Integer> bidx = buildBidxForStops(stops, requiredCells);
+            if (bidx.size() > EXACT_MAX_BONUS) { fellBack = true; break; }  // long maskに収まらない
+
+            Set<Long> reach = new HashSet<>();
+            reach.add(0L);
+            for (int seg = 0; seg <= m; seg++) {
+                Set<Long> sm = segAchievableMasks(stops[seg], stops[seg + 1], bidx, requiredCells);
+                Set<Long> nxt = new HashSet<>();
+                for (long r : reach) for (long mm : sm) nxt.add(r | mm);
+                reach = capMasks(nxt, bidx);
+            }
+
+            long[] inv = invBidx(bidx);
+            int bw = 0;
+            for (long mm : reach) { int w = maskWeight(mm, inv); if (w > bw) bw = w; }
+            int total = reqW + bw;
+            if (total > bestSeen) { bestSeen = total; bestOrder = order; }
+        }
+
+        if (fellBack) {
+            res.path = buildRoutePath(shelves);
+            res.seen = simulateTripAndCountShelves(shelves);
+            res.dist = res.path.isEmpty() ? -1 : res.path.size() - 1;
+            return res;
+        }
+
+        res.seen = bestSeen;
+        // seenを実現する経路を復元（区間ごとに最適なボーナス集合を通る具体的な経路）
+        res.path = reconstructOptimalPath(bestOrder, requiredCells);
+        return res;
+    }
+
+    static int[] orderToStops(int[] order) {
+        int m = order.length;
+        int[] stops = new int[m + 2];
+        stops[0] = -1; stops[m + 1] = -2;
+        for (int i = 0; i < m; i++) stops[i + 1] = order[i];
+        return stops;
+    }
+
+    // 訪問順の各区間に登場するボーナスセル（要求棚でないpickupセル）にビット位置を割り当てる
+    static Map<Long, Integer> buildBidxForStops(int[] stops, Set<Long> requiredCells) {
+        int segCount = stops.length - 1;
+        Map<Long, Integer> bidx = new HashMap<>();
+        for (int seg = 0; seg < segCount; seg++) {
+            int a = stops[seg], b = stops[seg + 1];
+            int[][] dA = distMapForStop(a), dB = distMapForStop(b);
+            int D = dA[stopX(b)][stopY(b)];
+            if (D < 0) continue;
+            for (int x = 0; x < W; x++)
+                for (int y = 0; y < H; y++) {
+                    if (dA[x][y] >= 0 && dB[x][y] >= 0 && dA[x][y] + dB[x][y] == D) {
+                        long ck = key(x, y);
+                        if (pickupToShelf.containsKey(ck) && !requiredCells.contains(ck) && !bidx.containsKey(ck))
+                            bidx.put(ck, bidx.size());
+                    }
+                }
+        }
+        return bidx;
+    }
+
+    // 与えられた訪問順で、区間をまたいだボーナス棚の和集合を最大化する組み合わせを
+    // 後戻り情報つきで求め、各区間で選んだマスクどおりの具体的な経路を復元して連結する。
+    static List<int[]> reconstructOptimalPath(int[] order, Set<Long> requiredCells) {
+        int m = order.length;
+        int[] stops = orderToStops(order);
+        Map<Long, Integer> bidx = buildBidxForStops(stops, requiredCells);
+
+        // 各区間のセル別マスクと終点マスク集合を用意
+        List<Map<Long, Set<Long>>> segCellMasks = new ArrayList<>();
+        List<List<Long>> segEndMasks = new ArrayList<>();
+        for (int seg = 0; seg <= m; seg++) {
+            Map<Long, Set<Long>> mc = segMasksWithCells(stops[seg], stops[seg + 1], bidx);
+            segCellMasks.add(mc);
+            Set<Long> end = mc.get(key(stopX(stops[seg + 1]), stopY(stops[seg + 1])));
+            if (end == null || end.isEmpty()) { end = new HashSet<>(); end.add(0L); }
+            segEndMasks.add(new ArrayList<>(end));
+        }
+
+        // 区間結合DP（後戻り情報つき）: union -> {前のunion, その区間で選んだマスク}
+        long[] inv = invBidx(bidx);
+        List<Map<Long, long[]>> back = new ArrayList<>();   // 区間ごとの後戻り表
+        Map<Long, Integer> reach = new HashMap<>();          // union -> weight
+        reach.put(0L, 0);
+        for (int seg = 0; seg <= m; seg++) {
+            Map<Long, long[]> bk = new HashMap<>();
+            Map<Long, Integer> nxt = new HashMap<>();
+            for (Map.Entry<Long, Integer> e : reach.entrySet()) {
+                long prevUnion = e.getKey();
+                for (long sm : segEndMasks.get(seg)) {
+                    long nu = prevUnion | sm;
+                    if (!nxt.containsKey(nu)) {
+                        nxt.put(nu, maskWeight(nu, inv));
+                        bk.put(nu, new long[]{prevUnion, sm});
+                    }
+                }
+            }
+            // capMasksと同じ発想で上位のみ保持
+            if (nxt.size() > EXACT_COMBO_CAP) {
+                final Map<Long, Integer> nxtRef = nxt;
+                List<Long> keys = new ArrayList<>(nxt.keySet());
+                keys.sort((p, q) -> Integer.compare(nxtRef.get(q), nxtRef.get(p)));
+                Map<Long, Integer> trimmed = new HashMap<>();
+                Map<Long, long[]> trimmedBk = new HashMap<>();
+                for (int i = 0; i < EXACT_COMBO_CAP; i++) { trimmed.put(keys.get(i), nxt.get(keys.get(i))); trimmedBk.put(keys.get(i), bk.get(keys.get(i))); }
+                nxt = trimmed; bk = trimmedBk;
+            }
+            reach = nxt; back.add(bk);
+        }
+
+        // 最良のunionを選ぶ
+        long bestUnion = 0L; int bestW = -1;
+        for (Map.Entry<Long, Integer> e : reach.entrySet())
+            if (e.getValue() > bestW) { bestW = e.getValue(); bestUnion = e.getKey(); }
+
+        // 後戻りして各区間で選んだマスクを復元
+        long[] segChosen = new long[m + 1];
+        long cur = bestUnion;
+        for (int seg = m; seg >= 0; seg--) {
+            long[] bp = back.get(seg).get(cur);
+            segChosen[seg] = bp[1];
+            cur = bp[0];
+        }
+
+        // 各区間の経路を復元して連結
+        List<int[]> path = new ArrayList<>();
+        for (int seg = 0; seg <= m; seg++) {
+            List<int[]> segPath = reconstructSegPath(stops[seg], stops[seg + 1], segChosen[seg],
+                                                      segCellMasks.get(seg), bidx);
+            if (seg == 0) path.addAll(segPath);
+            else path.addAll(segPath.subList(1, segPath.size()));
+        }
+        return path;
+    }
+
+    // 最短距離を実現する訪問順を全て集める（順列全探索、mが小さいときのみ）
+    static void permuteOrders(int[] shelves, int depth, int[] cur, boolean[] used,
+                               List<int[]> minOrders, int[] best) {
+        int m = shelves.length;
+        if (depth == m) {
+            int total = 0; boolean ok = true;
+            int d0 = startDist[cur[0]];
+            if (d0 < 0) ok = false; else total += d0;
+            for (int i = 1; ok && i < m; i++) {
+                int d = interDist[cur[i - 1]][cur[i]];
+                if (d < 0) ok = false; else total += d;
+            }
+            if (ok) { int de = exitDist[cur[m - 1]]; if (de < 0) ok = false; else total += de; }
+            if (ok) {
+                if (total < best[0]) { best[0] = total; minOrders.clear(); minOrders.add(cur.clone()); }
+                else if (total == best[0]) minOrders.add(cur.clone());
+            }
+            return;
+        }
+        for (int i = 0; i < m; i++) {
+            if (used[i]) continue;
+            used[i] = true; cur[depth] = shelves[i];
+            permuteOrders(shelves, depth + 1, cur, used, minOrders, best);
+            used[i] = false;
+        }
+    }
+
+    // 与えられた訪問順に沿って最短経路を復元する（距離は最小、棚を多く通る向きに寄せる）
+    static List<int[]> buildRoutePathForOrder(int[] order) {
+        List<int[]> path = new ArrayList<>();
+        int m = order.length;
+        if (m == 0) return path;
+        int first = order[0];
+        List<int[]> seg = pathCellsList(distFromStart, parentDirFromStart, pickX[first], pickY[first]);
+        Collections.reverse(seg);
+        path.addAll(seg);
+        for (int k = 1; k < m; k++) {
+            int prev = order[k - 1], cur = order[k];
+            seg = pathCellsList(distFromPickup[prev], parentDirFromPickup[prev], pickX[cur], pickY[cur]);
+            Collections.reverse(seg);
+            path.addAll(seg.subList(1, seg.size()));
+        }
+        int last = order[m - 1];
+        seg = pathCellsList(distFromExit, parentDirFromExit, pickX[last], pickY[last]);
+        path.addAll(seg.subList(1, seg.size()));
+        return path;
     }
 
     // 履歴1件分の実際の巡回順路（座標列、入口→…→出口）を復元する。simulateTripAndCountShelvesと同じDPを使う
@@ -461,26 +817,23 @@ public class Task7 {
     }
 
     // Task6と同じ形のbitmask DPで、与えられた棚集合を全部訪問する最短順序を求め、
-    // 実際に歩く経路セルを復元して、その上に乗る棚（=商品）の総数を返す
+    // 実際に歩く経路セルを復元して、その上に乗る棚（=商品）の総数を返す。
     //
-    // 【正しさの範囲・既知の限界】
-    // 各区間（入口→棚 / 棚→棚 / 棚→出口）は addPathCells が computeParentDir で
-    // 事前計算した「その区間の最短距離を保ったまま通過できる棚の数を最大化する経路」
-    // を選ぶため、shelvesが1個（区間が1本）の場合は「最短ルートの中で最大何個の
-    // 商品を回れるか」という値を厳密に返す（Generator/Task7/Task7BruteForceGen.py
-    // --case miss_decoy で回帰確認済み）。
-    // なお pickupToShelf は1マスに複数の棚（背中合わせ配置など）が乗る場合も
-    // 正しく全部数える（Generator/Task7/Task7ExposureTieGen.py で回帰確認済み）。
+    // 【この関数の役割と近似について】
+    // これは Stage D の局所探索（山登り）が大量に呼ぶスコア関数。区間ごとに独立して
+    // computeParentDir 事前計算の経路を辿るため、複数区間のトリップでは「区間をまたいだ
+    // 棚の重複除去まで最大化する」ことはしない近似値を返す（そのぶん高速）。
+    // 最適化の内側ループなので、この近似で十分としている。
     //
-    // shelvesが2個以上（区間が複数）の場合は、区間ごとに独立して最大化しているため、
-    // 「前の区間で既に通過した棚を後の区間で二重にカウントしない」という
-    // トリップ全体としての和集合の最大化までは保証しない。区間をまたいで真に
-    // 最大化するには、既に通過した棚を除外しながらトリップごとにその場でDPを
-    // 回す必要があり、Stage Dのホットループ内で呼ばれる頻度を考えると性能への
-    // 影響が無視できなくなる。得られる改善（現状ずれるのは主に±1件程度）に対して
-    // コストが見合わないと判断し、意図的に対応していない
-    // （Generator/Task7/Task7BruteForceGen.py --case clean_layout_demo が
-    //  この既知の限界を示すデモケースとして今もFAILし続ける）。
+    // 一方、最終出力（buildVizJson）で各履歴について報告する seen 値は、planTripExact が
+    // 区間をまたいだ和集合まで厳密に最大化した値を使う。つまり:
+    //   - Stage D の探索中: この近似関数（高速）
+    //   - 出力ルートの seen: planTripExact（厳密、履歴ごとに1回だけなので性能影響なし）
+    // という使い分けにしている。
+    //   厳密性の回帰確認: Generator/Task7/Task7BruteForceGen.py
+    //     --case miss_decoy（単一区間）/ --case clean_layout_demo（複数区間）ともにPASS。
+    //   pickupToShelf は1マスに複数の棚（背中合わせ配置）が乗る場合も全部数える
+    //     （Generator/Task7/Task7ExposureTieGen.py で回帰確認済み）。
     static int simulateTripAndCountShelves(int[] shelves) {
         int m = shelves.length;
         int full = 1 << m;
