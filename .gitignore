@@ -1,3 +1,6 @@
+# Java
+*.class
+
 # Python
 *.pyc
 __pycache__/
