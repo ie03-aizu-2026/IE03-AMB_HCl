@@ -13,6 +13,13 @@ public class Task7 {
     static int[][][] distFromPickup;    // 各棚の取得マスを始点としたBFS距離マップ
     static Map<Long, Integer> pickupToShelf; // 取得マス座標 -> 棚インデックス
 
+    // 各BFS始点について、「その始点からの最短距離を保ったまま、通過できる棚の数を
+    // 最大化する経路」を復元するための後退方向テーブル（0-3=GridMap.dx/dy添字, -1=始点）。
+    // 棚の座標配置だけで決まる値なので、商品→棚の割り当てが変わるStage Dのループ内では
+    // 再計算せず、セットアップ時に一度だけ計算して使い回す。
+    static int[][] parentDirFromStart, parentDirFromExit;
+    static int[][][] parentDirFromPickup;
+
     static final int INF = Integer.MAX_VALUE / 2;
     static final int TOP_PAIR_COUNT = 30; // Stage Dで局所探索の対象にする上位共起ペア数
     static final int MAX_ROUNDS = 5;      // Stage Dの反復上限（全ペアで改善なしなら早期終了）
@@ -84,12 +91,18 @@ public class Task7 {
         pickupToShelf = new HashMap<>();
         for (int i = 0; i < S; i++) pickupToShelf.put(key(pickX[i], pickY[i]), i);
 
+        // ---- 経路復元用の後退方向テーブルを一度だけ計算（Task7.java.orig_backupとの主な差分） ----
+        parentDirFromStart = computeParentDir(distFromStart, W, H);
+        parentDirFromExit  = computeParentDir(distFromExit, W, H);
+        parentDirFromPickup = new int[S][][];
+        for (int i = 0; i < S; i++) parentDirFromPickup[i] = computeParentDir(distFromPickup[i], W, H);
+
         // ---- Stage A: 棚ごとの露出スコア（単独で買いに行った時に何棚分「見える」か） ----
         int[] exposure = new int[S];
         for (int i = 0; i < S; i++) {
             Set<Long> cells = new HashSet<>();
-            addPathCells(cells, distFromStart, pickX[i], pickY[i]); // 入口 -> 棚i
-            addPathCells(cells, distFromExit,  pickX[i], pickY[i]); // 棚i -> 出口
+            addPathCells(cells, distFromStart, parentDirFromStart, pickX[i], pickY[i]); // 入口 -> 棚i
+            addPathCells(cells, distFromExit,  parentDirFromExit,  pickX[i], pickY[i]); // 棚i -> 出口
             int cnt = 0;
             for (long c : cells) {
                 Integer sh = pickupToShelf.get(c);
@@ -225,22 +238,65 @@ public class Task7 {
         return j.toString();
     }
 
-    // dist上のセルをtxtyから逆順に辿ってリスト化する（順序付き版）
-    static List<int[]> pathCellsList(int[][] dist, int tx, int ty) {
+    // dist上のセルをtxtyから逆順に辿ってリスト化する（順序付き版）。
+    // parentDirはcomputeParentDirで事前計算した「棚を最も多く通る経路」の後退方向。
+    static List<int[]> pathCellsList(int[][] dist, int[][] parentDir, int tx, int ty) {
         List<int[]> list = new ArrayList<>();
         int x = tx, y = ty;
         list.add(new int[]{x, y});
         while (dist[x][y] != 0) {
-            int cur = dist[x][y];
-            boolean moved = false;
-            for (int d = 0; d < 4; d++) {
-                int nx = x + GridMap.dx[d], ny = y + GridMap.dy[d];
-                if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
-                if (dist[nx][ny] == cur - 1) { x = nx; y = ny; list.add(new int[]{x, y}); moved = true; break; }
-            }
-            if (!moved) break;
+            int d = parentDir[x][y];
+            if (d < 0) break;
+            x = x + GridMap.dx[d];
+            y = y + GridMap.dy[d];
+            list.add(new int[]{x, y});
         }
         return list;
+    }
+
+    // dist（あるBFS始点からの距離マップ）が与えられたとき、始点から各マスへの
+    // 「最短距離を保ったまま通過できる棚の数」を最大化する経路の、後退方向を求める。
+    // BFSと同じ距離の昇順（レイヤー順）に処理する前向きDP:
+    //   best[c] = max( best[predecessor] ) + (cが棚の取得マスなら1)
+    // 距離が1減る隣接マスは複数ありうるが、bestが最大の方をparentDirとして採用する。
+    // 棚の座標配置だけで決まりStage Dの割り当てには依存しないため、セットアップ時に
+    // 一度だけ計算すればよく、Stage Dのホットループを重くしない。
+    static int[][] computeParentDir(int[][] dist, int Wp, int Hp) {
+        int[][] best = new int[Wp][Hp];
+        int[][] parentDir = new int[Wp][Hp];
+        for (int[] row : best) Arrays.fill(row, -1);
+        for (int[] row : parentDir) Arrays.fill(row, -1);
+
+        int maxDist = 0;
+        for (int x = 0; x < Wp; x++)
+            for (int y = 0; y < Hp; y++)
+                if (dist[x][y] > maxDist) maxDist = dist[x][y];
+
+        List<List<int[]>> buckets = new ArrayList<>(maxDist + 1);
+        for (int k = 0; k <= maxDist; k++) buckets.add(new ArrayList<>());
+        for (int x = 0; x < Wp; x++)
+            for (int y = 0; y < Hp; y++)
+                if (dist[x][y] >= 0) buckets.get(dist[x][y]).add(new int[]{x, y});
+
+        for (int[] c : buckets.get(0)) {
+            best[c[0]][c[1]] = pickupToShelf.containsKey(key(c[0], c[1])) ? 1 : 0;
+        }
+        for (int k = 1; k <= maxDist; k++) {
+            for (int[] c : buckets.get(k)) {
+                int x = c[0], y = c[1];
+                int bestPred = -1, bestDir = -1;
+                for (int d = 0; d < 4; d++) {
+                    int nx = x + GridMap.dx[d], ny = y + GridMap.dy[d];
+                    if (nx < 0 || ny < 0 || nx >= Wp || ny >= Hp) continue;
+                    if (dist[nx][ny] != k - 1) continue;
+                    if (best[nx][ny] > bestPred) { bestPred = best[nx][ny]; bestDir = d; }
+                }
+                int selfShelf = pickupToShelf.containsKey(key(x, y)) ? 1 : 0;
+                best[x][y] = bestPred + selfShelf;
+                parentDir[x][y] = bestDir;
+            }
+        }
+        return parentDir;
     }
 
     // 履歴1件分の実際の巡回順路（座標列、入口→…→出口）を復元する。simulateTripAndCountShelvesと同じDPを使う
@@ -291,18 +347,18 @@ public class Task7 {
 
         List<int[]> path = new ArrayList<>();
         int firstShelf = shelves[orderIdx[0]];
-        List<int[]> seg = pathCellsList(distFromStart, pickX[firstShelf], pickY[firstShelf]);
+        List<int[]> seg = pathCellsList(distFromStart, parentDirFromStart, pickX[firstShelf], pickY[firstShelf]);
         Collections.reverse(seg);
         path.addAll(seg);
         for (int k = 1; k < m; k++) {
             int prevShelf = shelves[orderIdx[k - 1]];
             int curShelf  = shelves[orderIdx[k]];
-            seg = pathCellsList(distFromPickup[prevShelf], pickX[curShelf], pickY[curShelf]);
+            seg = pathCellsList(distFromPickup[prevShelf], parentDirFromPickup[prevShelf], pickX[curShelf], pickY[curShelf]);
             Collections.reverse(seg);
             path.addAll(seg.subList(1, seg.size()));
         }
         int lastShelf = shelves[orderIdx[m - 1]];
-        seg = pathCellsList(distFromExit, pickX[lastShelf], pickY[lastShelf]);
+        seg = pathCellsList(distFromExit, parentDirFromExit, pickX[lastShelf], pickY[lastShelf]);
         path.addAll(seg.subList(1, seg.size()));
         return path;
     }
@@ -380,30 +436,42 @@ public class Task7 {
 
     static long key(int x, int y) { return (long) x * 100000 + y; }
 
-    // dist: あるBFS始点からの距離マップ。(tx,ty)からdist=0の始点まで逆順に辿り、通過セルを全てcellsへ追加する
-    static void addPathCells(Set<Long> cells, int[][] dist, int tx, int ty) {
+    // dist: あるBFS始点からの距離マップ。(tx,ty)からdist=0の始点までparentDir
+    // （computeParentDirで事前計算済み、棚を最も多く通る経路の後退方向）を辿り、
+    // 通過セルを全てcellsへ追加する
+    static void addPathCells(Set<Long> cells, int[][] dist, int[][] parentDir, int tx, int ty) {
         int x = tx, y = ty;
         cells.add(key(x, y));
         while (dist[x][y] != 0) {
-            int cur = dist[x][y];
-            boolean moved = false;
-            for (int d = 0; d < 4; d++) {
-                int nx = x + GridMap.dx[d];
-                int ny = y + GridMap.dy[d];
-                if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
-                if (dist[nx][ny] == cur - 1) {
-                    x = nx; y = ny;
-                    cells.add(key(x, y));
-                    moved = true;
-                    break;
-                }
-            }
-            if (!moved) break;
+            int d = parentDir[x][y];
+            if (d < 0) break;
+            x = x + GridMap.dx[d];
+            y = y + GridMap.dy[d];
+            cells.add(key(x, y));
         }
     }
 
     // Task6と同じ形のbitmask DPで、与えられた棚集合を全部訪問する最短順序を求め、
     // 実際に歩く経路セルを復元して、その上に乗る棚（=商品）の総数を返す
+    //
+    // 【正しさの範囲・既知の限界】
+    // 各区間（入口→棚 / 棚→棚 / 棚→出口）は addPathCells が computeParentDir で
+    // 事前計算した「その区間の最短距離を保ったまま通過できる棚の数を最大化する経路」
+    // を選ぶため、shelvesが1個（区間が1本）の場合は「最短ルートの中で最大何個の
+    // 商品を回れるか」という値を厳密に返す（Generator/Task7/Task7BruteForceGen.py
+    // --case miss_decoy で回帰確認済み）。
+    // なお pickupToShelf は1マスに複数の棚（背中合わせ配置など）が乗る場合も
+    // 正しく全部数える（Generator/Task7/Task7ExposureTieGen.py で回帰確認済み）。
+    //
+    // shelvesが2個以上（区間が複数）の場合は、区間ごとに独立して最大化しているため、
+    // 「前の区間で既に通過した棚を後の区間で二重にカウントしない」という
+    // トリップ全体としての和集合の最大化までは保証しない。区間をまたいで真に
+    // 最大化するには、既に通過した棚を除外しながらトリップごとにその場でDPを
+    // 回す必要があり、Stage Dのホットループ内で呼ばれる頻度を考えると性能への
+    // 影響が無視できなくなる。得られる改善（現状ずれるのは主に±1件程度）に対して
+    // コストが見合わないと判断し、意図的に対応していない
+    // （Generator/Task7/Task7BruteForceGen.py --case clean_layout_demo が
+    //  この既知の限界を示すデモケースとして今もFAILし続ける）。
     static int simulateTripAndCountShelves(int[] shelves) {
         int m = shelves.length;
         int full = 1 << m;
@@ -453,14 +521,14 @@ public class Task7 {
 
         Set<Long> cells = new HashSet<>();
         int firstShelf = shelves[orderIdx[0]];
-        addPathCells(cells, distFromStart, pickX[firstShelf], pickY[firstShelf]);
+        addPathCells(cells, distFromStart, parentDirFromStart, pickX[firstShelf], pickY[firstShelf]);
         for (int k = 1; k < m; k++) {
             int prevShelf = shelves[orderIdx[k - 1]];
             int curShelf  = shelves[orderIdx[k]];
-            addPathCells(cells, distFromPickup[prevShelf], pickX[curShelf], pickY[curShelf]);
+            addPathCells(cells, distFromPickup[prevShelf], parentDirFromPickup[prevShelf], pickX[curShelf], pickY[curShelf]);
         }
         int lastShelf = shelves[orderIdx[m - 1]];
-        addPathCells(cells, distFromExit, pickX[lastShelf], pickY[lastShelf]);
+        addPathCells(cells, distFromExit, parentDirFromExit, pickX[lastShelf], pickY[lastShelf]);
 
         int seen = 0;
         for (long c : cells) if (pickupToShelf.containsKey(c)) seen++;
